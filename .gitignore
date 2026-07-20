@@ -1,0 +1,13 @@
+# Secrets — never commit
+api/.env
+.env
+
+# Signup data — contains real emails
+api/signups.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
