@@ -27,7 +27,7 @@ const { body, validationResult } = require('express-validator');
 const nodemailer     = require('nodemailer');
 const { Resend }     = require('resend');
 const mongoSanitize  = require('express-mongo-sanitize');
-const xssClean       = require('xss-clean');
+const xss            = require('xss');
 const hpp            = require('hpp');
 const validator      = require('validator');
 const { v4: uuidv4 } = require('uuid');
@@ -46,15 +46,30 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
 
 // ── Local JSON store ──────────────────────────────────────────────────────────
 const DATA_FILE = path.join(__dirname, 'signups.json');
+let inMemoryStore = null; // fallback when filesystem is read-only (Railway)
+
 function loadSignups() {
-  try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }
-  catch { return { waitlist: [], community: [], contact: [] }; }
+  if (inMemoryStore) return inMemoryStore;
+  try {
+    const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+    inMemoryStore = data;
+    return data;
+  } catch {
+    inMemoryStore = { waitlist: [], community: [], contact: [] };
+    return inMemoryStore;
+  }
 }
+
 function saveSignups(data) {
-  // atomic write — write to temp then rename to avoid corruption
-  const tmp = DATA_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, DATA_FILE);
+  inMemoryStore = data; // always update in-memory first
+  try {
+    const tmp = DATA_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, DATA_FILE);
+  } catch (e) {
+    // Railway / read-only filesystem — in-memory store is the source of truth
+    log('warn', 'disk_write_skipped', { reason: e.message });
+  }
 }
 
 // ── Structured logger — never logs PII in production ─────────────────────────
@@ -293,8 +308,17 @@ app.use(hpp());
 // A03 — Strip MongoDB operators from input ($where, $gt etc.)
 app.use(mongoSanitize({ replaceWith: '_' }));
 
-// A03 — XSS clean: sanitize req.body, req.query, req.params
-app.use(xssClean());
+// A03 — XSS sanitize all string fields in req.body
+app.use((req, res, next) => {
+  if (req.body && typeof req.body === 'object') {
+    for (const key of Object.keys(req.body)) {
+      if (typeof req.body[key] === 'string') {
+        req.body[key] = xss(req.body[key]);
+      }
+    }
+  }
+  next();
+});
 
 // Request ID for tracing — every request gets a unique ID
 app.use((req, res, next) => {
